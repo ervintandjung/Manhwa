@@ -152,32 +152,60 @@ var API='https://api.mangadex.org',CB='https://uploads.mangadex.org/covers';
 var curManga=null,curChs=[],curIdx=0,curType='all',curGenre=null;
 var popAll=[],newAll=[];
 
-var PROXIES=[
+// Multiple proxy strategies — tries each in order until one works
+var PROXY_FNS=[
+  // 1. Direct (jika tidak diblokir)
   function(u){return u;},
+  // 2. corsproxy.io
   function(u){return'https://corsproxy.io/?'+encodeURIComponent(u);},
-  function(u){return'https://api.allorigins.win/raw?url='+encodeURIComponent(u);}
+  // 3. allorigins
+  function(u){return'https://api.allorigins.win/raw?url='+encodeURIComponent(u);},
+  // 4. thingproxy
+  function(u){return'https://thingproxy.freeboard.io/fetch/'+u;},
+  // 5. codetabs proxy
+  function(u){return'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u);},
+  // 6. jsonp.afeld.me (last resort)
+  function(u){return'https://yacdn.org/proxy/'+u;}
 ];
+
+// Remember which proxy worked last time to skip failures
+var goodProxy=0;
 
 async function apiFetch(path){
   var url=API+path;
   var last=null;
-  for(var i=0;i<PROXIES.length;i++){
+  // Try from last known good proxy first, then try all others
+  var order=[];
+  for(var i=goodProxy;i<PROXY_FNS.length;i++) order.push(i);
+  for(var i=0;i<goodProxy;i++) order.push(i);
+
+  for(var k=0;k<order.length;k++){
+    var i=order[k];
     try{
-      var r=await fetch(PROXIES[i](url),{headers:{'Accept':'application/json'},signal:AbortSignal.timeout(9000)});
+      var purl=PROXY_FNS[i](url);
+      var r=await fetch(purl,{
+        headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'},
+        signal:AbortSignal.timeout(10000)
+      });
       if(!r.ok) throw new Error('HTTP '+r.status);
-      return await r.json();
+      var json=await r.json();
+      goodProxy=i; // remember the working proxy
+      return json;
     }catch(e){
       last=e;
-      if(i<PROXIES.length-1) console.warn('proxy '+i+' failed, trying next...');
+      console.warn('Proxy #'+i+' gagal untuk '+path+': '+e.message);
     }
   }
-  throw last;
+  throw last||new Error('Semua proxy gagal');
 }
 
 function coverUrl(m){
   var rel=(m.relationships||[]).find(function(r){return r.type==='cover_art';});
   if(!rel||!rel.attributes||!rel.attributes.fileName) return null;
   return CB+'/'+m.id+'/'+rel.attributes.fileName+'.256.jpg';
+}
+function proxiedImg(src){
+  return'https://corsproxy.io/?'+encodeURIComponent(src);
 }
 function title(m){
   var t=m.attributes.title;
@@ -207,7 +235,7 @@ function skels(id,n){
 
 function card(m){
   var tp=mtype(m),ti=title(m),cu=coverUrl(m),ch=m.attributes.lastChapter||'?';
-  var img=cu?'<img src="'+cu+'" alt="'+ti+'" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
+  var img=cu?'<img src="'+cu+'" alt="'+ti+'" loading="lazy" onerror="if(!this.dataset.p){this.dataset.p=1;this.src=proxiedImg(\''+cu+'\');}else{this.style.display=\'none\';this.nextSibling.style.display=\'flex\';}">'
           :'';
   var ph='<div class="card-ph" '+(cu?'style="display:none"':'')+'>📖</div>';
   return '<div class="card" onclick="openDet(\''+m.id+'\')">'
@@ -311,6 +339,7 @@ async function openDet(id){
     var auths=m.relationships.filter(function(r){return r.type==='author'||r.type==='artist';}).map(function(r){return r.attributes&&r.attributes.name;}).filter(Boolean).join(', ');
     var tags=(m.attributes.tags||[]).slice(0,6).map(function(t){return'<span class="tag">'+t.attributes.name.en+'</span>';}).join('');
     document.getElementById('d-img').src=cu||'';
+    document.getElementById('d-img').onerror=function(){if(!this.dataset.p&&cu){this.dataset.p=1;this.src=proxiedImg(cu);}}
     document.getElementById('d-badge').textContent=tp.toUpperCase();
     document.getElementById('d-badge').className='det-badge '+bclass(tp);
     document.getElementById('d-title').textContent=ti;
