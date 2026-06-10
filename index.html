@@ -148,64 +148,83 @@ main{padding:1rem;max-width:1200px;margin:0 auto}
   <div class="pages" id="pages"><div class="status"><span class="spin"></span>Memuat...</div></div>
 </div>
 <script>
-var API='https://api.mangadex.org',CB='https://uploads.mangadex.org/covers';
+// ============================================================
+// KONFIGURASI API
+// GANTI "YOUR_WORKER" dengan subdomain worker kamu!
+// Contoh: jika worker kamu "api.vinzprostore.workers.dev"
+//         maka PROXY_BASE = 'https://api.vinzprostore.workers.dev'
+// ============================================================
+var PROXY_BASE = 'https://manhwavinz.vinzprostore.workers.dev'; // <-- GANTI INI
+var MDEX_DIRECT = 'https://api.mangadex.org';
+var CB_DIRECT = 'https://uploads.mangadex.org/covers';
+
 var curManga=null,curChs=[],curIdx=0,curType='all',curGenre=null;
 var popAll=[],newAll=[];
+var useProxy=true; // akan di-set false jika direct berhasil
 
-// Multiple proxy strategies — tries each in order until one works
-var PROXY_FNS=[
-  // 1. Direct (jika tidak diblokir)
-  function(u){return u;},
-  // 2. corsproxy.io
-  function(u){return'https://corsproxy.io/?'+encodeURIComponent(u);},
-  // 3. allorigins
-  function(u){return'https://api.allorigins.win/raw?url='+encodeURIComponent(u);},
-  // 4. thingproxy
-  function(u){return'https://thingproxy.freeboard.io/fetch/'+u;},
-  // 5. codetabs proxy
-  function(u){return'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u);},
-  // 6. jsonp.afeld.me (last resort)
-  function(u){return'https://yacdn.org/proxy/'+u;}
-];
-
-// Remember which proxy worked last time to skip failures
-var goodProxy=0;
+// Test apakah direct bisa, jika tidak pakai proxy worker
+async function testDirect(){
+  try{
+    var r=await fetch(MDEX_DIRECT+'/ping',{signal:AbortSignal.timeout(4000)});
+    if(r.ok){useProxy=false;console.log('Direct MangaDex OK');}
+  }catch(e){
+    useProxy=true;console.log('Pakai proxy worker');
+  }
+}
 
 async function apiFetch(path){
-  var url=API+path;
   var last=null;
-  // Try from last known good proxy first, then try all others
-  var order=[];
-  for(var i=goodProxy;i<PROXY_FNS.length;i++) order.push(i);
-  for(var i=0;i<goodProxy;i++) order.push(i);
+  // Coba 1: Worker proxy kamu (paling reliable karena domain sendiri)
+  try{
+    var r=await fetch(PROXY_BASE+'/api'+path,{
+      headers:{'Accept':'application/json'},
+      signal:AbortSignal.timeout(12000)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){last=e;console.warn('Proxy worker gagal:',e.message);}
 
-  for(var k=0;k<order.length;k++){
-    var i=order[k];
-    try{
-      var purl=PROXY_FNS[i](url);
-      var r=await fetch(purl,{
-        headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'},
-        signal:AbortSignal.timeout(10000)
-      });
-      if(!r.ok) throw new Error('HTTP '+r.status);
-      var json=await r.json();
-      goodProxy=i; // remember the working proxy
-      return json;
-    }catch(e){
-      last=e;
-      console.warn('Proxy #'+i+' gagal untuk '+path+': '+e.message);
-    }
-  }
-  throw last||new Error('Semua proxy gagal');
+  // Coba 2: Direct MangaDex
+  try{
+    var r=await fetch(MDEX_DIRECT+path,{
+      headers:{'Accept':'application/json'},
+      signal:AbortSignal.timeout(10000)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){last=e;console.warn('Direct MangaDex gagal:',e.message);}
+
+  // Coba 3: corsproxy.io
+  try{
+    var r=await fetch('https://corsproxy.io/?'+encodeURIComponent(MDEX_DIRECT+path),{
+      headers:{'Accept':'application/json'},
+      signal:AbortSignal.timeout(12000)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){last=e;console.warn('corsproxy gagal:',e.message);}
+
+  // Coba 4: allorigins
+  try{
+    var r=await fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(MDEX_DIRECT+path),{
+      signal:AbortSignal.timeout(12000)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){last=e;}
+
+  throw last||new Error('Semua sumber gagal');
 }
 
 function coverUrl(m){
   var rel=(m.relationships||[]).find(function(r){return r.type==='cover_art';});
   if(!rel||!rel.attributes||!rel.attributes.fileName) return null;
-  return CB+'/'+m.id+'/'+rel.attributes.fileName+'.256.jpg';
+  // Coba via proxy worker dulu, fallback ke direct
+  return PROXY_BASE+'/covers/'+m.id+'/'+rel.attributes.fileName+'.256.jpg';
 }
-function proxiedImg(src){
-  return'https://corsproxy.io/?'+encodeURIComponent(src);
+function imgErr(el,directUrl){
+  if(!el.dataset.f){el.dataset.f=1;el.src=directUrl;}
+  else{el.style.display='none';el.nextSibling&&(el.nextSibling.style.display='flex');}
 }
 function title(m){
   var t=m.attributes.title;
@@ -235,7 +254,8 @@ function skels(id,n){
 
 function card(m){
   var tp=mtype(m),ti=title(m),cu=coverUrl(m),ch=m.attributes.lastChapter||'?';
-  var img=cu?'<img src="'+cu+'" alt="'+ti+'" loading="lazy" onerror="if(!this.dataset.p){this.dataset.p=1;this.src=proxiedImg(\''+cu+'\');}else{this.style.display=\'none\';this.nextSibling.style.display=\'flex\';}">'
+  var directCu=cu?CB_DIRECT+'/'+m.id+'/'+(m.relationships||[]).find(function(r){return r.type==='cover_art';})+'.256.jpg':'';
+  var img=cu?'<img src="'+cu+'" alt="'+ti+'" loading="lazy" onerror="imgErr(this,\''+CB_DIRECT+'/'+m.id+'/'+(((m.relationships||[]).find(function(r){return r.type==='cover_art';})||{attributes:{}}).attributes||{}).fileName+'.256.jpg\')">'
           :'';
   var ph='<div class="card-ph" '+(cu?'style="display:none"':'')+'>📖</div>';
   return '<div class="card" onclick="openDet(\''+m.id+'\')">'
@@ -263,7 +283,7 @@ async function fetchPop(){
     popAll=j.data||[];
     renderGrid('pop-grid',popAll);
   }catch(e){
-    document.getElementById('pop-grid').innerHTML='<div class="no-res err">❌ Gagal memuat populer.<br><small>Pastikan ada koneksi internet.<br>'+e.message+'</small></div>';
+    document.getElementById('pop-grid').innerHTML='<div class="no-res err">❌ Gagal memuat populer.<br><small>'+e.message+'</small></div>';
   }
 }
 
@@ -338,8 +358,10 @@ async function openDet(id){
     var desc=m.attributes.description&&(m.attributes.description.en||m.attributes.description.id)||'Tidak ada deskripsi.';
     var auths=m.relationships.filter(function(r){return r.type==='author'||r.type==='artist';}).map(function(r){return r.attributes&&r.attributes.name;}).filter(Boolean).join(', ');
     var tags=(m.attributes.tags||[]).slice(0,6).map(function(t){return'<span class="tag">'+t.attributes.name.en+'</span>';}).join('');
-    document.getElementById('d-img').src=cu||'';
-    document.getElementById('d-img').onerror=function(){if(!this.dataset.p&&cu){this.dataset.p=1;this.src=proxiedImg(cu);}}
+    var dimg=document.getElementById('d-img');
+    dimg.src=cu||'';
+    var directCu=cu?cu.replace(PROXY_BASE+'/covers/',CB_DIRECT+'/covers/'):'';
+    dimg.onerror=function(){if(!this.dataset.f&&cu){this.dataset.f=1;this.src=CB_DIRECT+'/'+m.id+'/'+((m.relationships||[]).find(function(r){return r.type==='cover_art';})||{attributes:{fileName:''}}).attributes.fileName+'.256.jpg';}};
     document.getElementById('d-badge').textContent=tp.toUpperCase();
     document.getElementById('d-badge').className='det-badge '+bclass(tp);
     document.getElementById('d-title').textContent=ti;
@@ -398,7 +420,9 @@ async function loadPages(idx){
     var base=j.baseUrl,hash=j.chapter.hash,imgs=j.chapter.data||[];
     if(!imgs.length){pg.innerHTML='<div class="status">Tidak ada halaman.</div>';return;}
     pg.innerHTML=imgs.map(function(img,i){
-      return'<img src="'+base+'/data/'+hash+'/'+img+'" alt="P'+(i+1)+'" loading="'+(i<2?'eager':'lazy')+'">';
+      // Coba load langsung dari server MangaDex at-home (tidak perlu proxy)
+      var src=base+'/data/'+hash+'/'+img;
+      return'<img src="'+src+'" alt="P'+(i+1)+'" loading="'+(i<3?'eager':'lazy')+'" onerror="this.src=\'https://corsproxy.io/?'+encodeURIComponent(base+'/data/'+hash+'/')+encodeURIComponent(img)+'\';">';
     }).join('');
     document.getElementById('reader-v').scrollTop=54;
   }catch(e){
